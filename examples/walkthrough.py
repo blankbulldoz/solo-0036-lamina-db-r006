@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Bounded production walkthroughs using only the public HTTP service."""
 import argparse, concurrent.futures, json, os, pathlib, shutil, socket, subprocess, tempfile, time, urllib.request, urllib.error
-WORKFLOWS=['catalog-create','txn-write','snapshot-read','index-build','query-plan','sql-execute','txn-conflict','restart','checkpoint','backup-restore','changes','vacuum','transaction-close','statistics']
+WORKFLOWS=['catalog-create','txn-write','snapshot-read','index-build','query-plan','sql-execute','txn-conflict','restart','checkpoint','backup-restore','changes','vacuum','transaction-close','statistics','schema-evolution']
 class Session:
  def __init__(self,binary,root,restore=None):
   self.binary=str(binary);self.root=pathlib.Path(root);self.restore=restore;self.process=None;self.log=None
@@ -38,6 +38,10 @@ class Session:
  def commit(self,tx,status=200):return self.call('POST',f'/transactions/{tx}/commit',status=status)
  def query(self,**kwargs):return self.call('POST','/query',{'relation':'spectra',**kwargs})
  def stats(self):return self.call('GET','/stats')
+ def evolve(self,changes,status=200,note=None):
+  body={'relation':'spectra','changes':changes}
+  if note is not None:body['note']=note
+  return self.call('POST','/relations/evolve',body,status)
 def require(condition,message):
  if not condition:raise RuntimeError(message)
 def tuple_(n,band=None,amplitude=None):return {'sample':n,'band':band or f'b{n}','amplitude':n*10 if amplitude is None else amplitude,'valid':True}
@@ -152,6 +156,75 @@ def walkthrough(name,binary):
     q=s.query(where=[{'column':'amplitude','op':'>=','value':40}],limit=2)
     require(q['matched']==3 and q['scanned']==3 and len(q['rows'])==2 and q['truncated'],'query fact meanings conflated')
     observations={'query':q,'stats':s.stats()}
+   elif name=='schema-evolution':
+    # 1. add a nullable column without touching existing rows
+    before=s.stats()['sequence']
+    r1=s.evolve([{'action':'add_column','column':'region','type':'text','nullable':True}],note='nullable add')
+    require(r1['columns'][-1]['name']=='region' and len(r1['revisions'])==2,'evolution revision missing')
+    evolve_seq=before+1
+    require(s.stats()['sequence']==evolve_seq,'evolution did not publish exactly one record')
+    old_rows=s.query()['rows']
+    require(all(row['region'] is None for row in old_rows),'historical rows were not backfilled as null')
+    # 2. non-null column without a default is an incompatible rejection, no sequence consumed
+    bad=s.evolve([{'action':'add_column','column':'tier','type':'text','nullable':False}],409)
+    require(bad['error']['code']=='incompatible','incompatible adjustment not flagged')
+    require(s.stats()['sequence']==evolve_seq,'rejected evolution advanced the sequence')
+    # 3. the same column with a typed default is admitted; old rows keep one entry point
+    r2=s.evolve([{'action':'add_column','column':'tier','type':'text','nullable':False,'default':'standard'}])
+    cur_rows=s.query()['rows']
+    require(all(row['tier']=='standard' for row in cur_rows),'default was not applied to historical rows')
+    # later writes can omit the column and inherit the default, or override it
+    tx=s.begin();s.put(tx,{'sample':8,'band':'b8','amplitude':80,'valid':True,'region':'north'});s.commit(tx)
+    tx=s.begin();s.put(tx,{'sample':9,'band':'b9','amplitude':90,'valid':True,'tier':'premium'});s.commit(tx)
+    n8=next(r for r in s.query()['rows'] if r['sample']==8)
+    n9=next(r for r in s.query()['rows'] if r['sample']==9)
+    require(n8['tier']=='standard' and n8['region']=='north' and n9['tier']=='premium','new writes misinterpreted')
+    # 4. a long transaction opened before an evolution keeps its old interpretation and cannot write the new schema
+    long_tx=s.begin()
+    s.evolve([{'action':'set_default','column':'tier','default':'bronze'}],note='default reinterpretation')
+    old_view=s.query(transaction=long_tx)
+    require(all('tier' not in row or row.get('tier')!='bronze' for row in old_view['rows']),'old snapshot reinterpreted historical rows')
+    s.call('POST',f'/transactions/{long_tx}/put',{'relation':'spectra','row':tuple_(10)},409)
+    s.call('POST',f'/transactions/{long_tx}/rollback')
+    require(next(r for r in s.query()['rows'] if r['sample']==1)['tier']=='bronze','current interpretation did not change')
+    # 5. incompatible family: type change, column drop, drop default on non-null column
+    for changes in (
+      [{'action':'add_column','column':'dup','type':'int','nullable':True,'default':'oops'}],
+      [{'action':'set_default','column':'sample','default':1}],
+      [{'action':'drop_default','column':'tier'}],
+    ):
+     require(s.evolve(changes,409)['error']['code']=='incompatible','expected incompatible rejection')
+    require(s.evolve([{'action':'add_column','column':'bad'}],400)['error']['code']=='invalid','shape error must be 400')
+    # 6. an index over an evolved column covers defaulted historical values
+    s.call('POST','/indexes',{'name':'by_tier','relation':'spectra','column':'tier'},201)
+    plan=s.query(where=[{'column':'tier','op':'=','value':'bronze'}],force_scan=True)
+    seven=sum(1 for r in s.query()['rows'] if r['sample']<=7)
+    require(plan['matched']==seven and all(r['tier']=='bronze' for r in plan['rows']),'reinterpreted default not applied to pre-evolution rows')
+    plan=s.query(where=[{'column':'tier','op':'=','value':'premium'}])
+    require(plan['plan']['access']=='index' and plan['matched']==1 and plan['rows'][0]['sample']==9,'index path on evolved column returned wrong tuple')
+    # 7. the change feed exposes when each evolution became effective
+    page=s.call('GET',f'/changes?after={before}&limit=100')
+    kinds=[rec['kind'] for rec in page['records']]
+    require(kinds.count('evolve')==3,'evolution records missing from change feed')
+    # 8. backup/restore preserves historical interpretations across the same relation entry
+    backup=s.call('GET','/backup',raw=True);path=temp/'schema.lmi';path.write_bytes(backup)
+    other=Session(binary,temp/'schema-restored',path).start()
+    restored_now=other.query()['rows']
+    restored_old=other.query(at=evolve_seq)['rows']
+    require(all('tier' not in row for row in restored_old),'restore lost the old schema revision')
+    tier_of={row['sample']:row['tier'] for row in restored_now}
+    expect={**{n:'bronze' for n in range(1,8)},8:'standard',9:'premium'}
+    require(all(tier_of[n]==v for n,v in expect.items()),'restore lost the current revision defaults')
+    other.stop()
+    # 9. vacuum reclaims superseded revisions; queries below the horizon become unsupported
+    requested=s.stats()['sequence']
+    reclaimed=s.call('POST','/vacuum',{'horizon':requested})
+    require(reclaimed['schema_revisions_pruned']>=1,'superseded schema revisions not reclaimed')
+    require(s.stats()['schema_revisions']>=1,'current schema revision must survive vacuum')
+    s.call('POST','/query',{'relation':'spectra','at':before},410)
+    s.call('POST','/checkpoint');s.stop();s.start()
+    require(s.query()['rows']==cur_rows or len(s.query()['rows'])==len(cur_rows)+2,'restart changed post-evolution data')
+    observations={'revisions':len(s.call('GET','/catalog')['relations'][0]['revisions']),'vacuum':reclaimed,'incompatible_rejected':s.stats()['incompatible_evolutions_rejected'],'evolutions':s.stats()['evolutions_since_open']}
    else:raise ValueError(name)
    return {'workflow':name,'status':'observed','observations':observations}
   finally:

@@ -35,7 +35,13 @@ func (d *DB) Query(q query.Request) (query.Result, error) {
 	if at < r.Created {
 		return query.Result{}, fault("snapshot", "relation did not exist at snapshot")
 	}
-	if err = query.Bind(r, q); err != nil {
+	// The same relation entry serves every snapshot, but each snapshot is
+	// interpreted through the schema revision effective at that snapshot.
+	schema, ok := r.SchemaAt(at)
+	if !ok {
+		return query.Result{}, fault("snapshot", "schema revision for snapshot %d was reclaimed", at)
+	}
+	if err = query.Bind(schema, q); err != nil {
 		return query.Result{}, invalid(err)
 	}
 	if tx != nil && len(tx.writes[q.Relation]) > 0 {
@@ -52,10 +58,18 @@ func (d *DB) Query(q query.Request) (query.Result, error) {
 	} else {
 		rows = d.store.Scan(q.Relation, at)
 	}
-	if tx != nil {
-		overlay(rows, tx.writes, q.Relation)
+	interpreted := make(map[string]datum.Row, len(rows))
+	for key, row := range rows {
+		projected, err := schema.Interpret(row)
+		if err != nil {
+			return query.Result{}, fault("snapshot", "stored tuple cannot be interpreted at snapshot %d: %s", at, err)
+		}
+		interpreted[key] = projected
 	}
-	result, err := query.Execute(r, q, rows, plan, keys)
+	if tx != nil {
+		overlay(interpreted, tx.writes, q.Relation)
+	}
+	result, err := query.Execute(schema, q, interpreted, plan, keys)
 	d.queries++
 	if err != nil {
 		return result, invalid(err)

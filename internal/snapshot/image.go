@@ -79,6 +79,25 @@ func Validate(image Image) error {
 		if err := r.Validate(); err != nil {
 			return err
 		}
+		r.EnsureRevisions()
+		// The first retained revision may postdate Created when earlier
+		// revisions were reclaimed by vacuum; it can never precede creation.
+		if r.Revisions[0].Sequence < r.Created {
+			return fmt.Errorf("invalid initial schema revision")
+		}
+		var last uint64
+		for _, rev := range r.Revisions {
+			if rev.Sequence <= last || rev.Sequence > image.Sequence {
+				return fmt.Errorf("invalid schema revision order")
+			}
+			last = rev.Sequence
+			check := r
+			check.Columns = rev.Columns
+			if err := check.Validate(); err != nil {
+				return fmt.Errorf("invalid schema revision: %w", err)
+			}
+		}
+		image.Catalog.Relations[name] = r
 	}
 	for name, definition := range image.Catalog.Indexes {
 		relation, ok := image.Catalog.Relations[definition.Relation]
@@ -105,8 +124,14 @@ func Validate(image Image) error {
 				}
 				last = v.Sequence
 				if !v.Deleted {
-					row, err := r.Normalize(v.Row)
-					if err != nil || r.Key(row) != key {
+					// Every retained row must remain interpretable through
+					// the schema revision effective at its own sequence.
+					schema, exists := r.SchemaAt(v.Sequence)
+					if !exists {
+						return fmt.Errorf("stored tuple lacks a schema revision")
+					}
+					row, err := schema.Normalize(v.Row)
+					if err != nil || schema.Key(row) != key {
 						return fmt.Errorf("invalid stored tuple")
 					}
 				}
@@ -118,12 +143,21 @@ func Validate(image Image) error {
 			continue
 		}
 		seen := map[string]bool{}
+		relation := image.Catalog.Relations[definition.Relation]
 		for _, chain := range image.Store.Tables[definition.Relation] {
 			version, exists := versions.Visible(chain, image.Sequence)
 			if !exists {
 				continue
 			}
-			value := version.Row[definition.Column]
+			current, ok := relation.SchemaAt(image.Sequence)
+			if !ok {
+				return fmt.Errorf("index validation lacks current schema")
+			}
+			row, err := current.Interpret(version.Row)
+			if err != nil {
+				return fmt.Errorf("index tuple not interpretable: %w", err)
+			}
+			value := row[definition.Column]
 			if value.Null() {
 				continue
 			}

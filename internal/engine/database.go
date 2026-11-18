@@ -26,6 +26,8 @@ type DB struct {
 	commits      uint64
 	conflicts    uint64
 	queries      uint64
+	evolutions   uint64
+	incompatible uint64
 }
 
 func Open(dir string) (*DB, error) {
@@ -69,7 +71,9 @@ func Open(dir string) (*DB, error) {
 		}
 	}
 	d.indexes = index.Build(d.catalog, d.store)
-	for _, relation := range d.catalog.List() {
+	for name, relation := range d.catalog.Relations {
+		relation.EnsureRevisions()
+		d.catalog.Relations[name] = relation
 		if err = d.unique(relation.Name, nil); err != nil {
 			w.Close()
 			return nil, fmt.Errorf("recovered constraints: %w", err)

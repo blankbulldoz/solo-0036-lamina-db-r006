@@ -13,7 +13,7 @@
       "id": "catalog",
       "name": "catalog",
       "path": "internal/catalog",
-      "responsibility": "immutable relation schemas, index definitions and normalization"
+      "responsibility": "relation schemas with sequence-bound revisions, index definitions and normalization"
     },
     {
       "id": "versions",
@@ -84,6 +84,30 @@
       "success": "typed relation admission produces a verified domain result",
       "failure": "invalid schema leaves no relation",
       "verification": "python3 examples/walkthrough.py --workflow catalog-create"
+    },
+    {
+      "id": "schema-evolution",
+      "name": "controlled schema evolution with snapshot-bound revisions",
+      "entry": "POST /relations/evolve",
+      "steps": [
+        "transport",
+        "catalog",
+        "engine",
+        "journal",
+        "snapshot",
+        "versions"
+      ],
+      "module_ids": [
+        "transport",
+        "catalog",
+        "engine",
+        "journal",
+        "snapshot",
+        "versions"
+      ],
+      "success": "new columns and default reinterpretations serve historical and new rows through the same relation entry while old snapshots keep their interpretation",
+      "failure": "incompatible adjustments are rejected without consuming a sequence; reclaimed revisions retire pre-horizon queries",
+      "verification": "python3 examples/walkthrough.py --workflow schema-evolution"
     },
     {
       "id": "txn-write",

@@ -5,11 +5,16 @@
     ".go"
   ],
   "build_command": "go build -o bin/laminad ./cmd/laminad",
-  "testing": "deferred",
+  "test_command": "go test ./...",
+  "testing": "go-test-plus-walkthroughs",
   "workflow_checks": [
     {
       "workflow_id": "catalog-create",
       "command": "python3 examples/walkthrough.py --workflow catalog-create"
+    },
+    {
+      "workflow_id": "schema-evolution",
+      "command": "python3 examples/walkthrough.py --workflow schema-evolution"
     },
     {
       "workflow_id": "txn-write",

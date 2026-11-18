@@ -72,6 +72,9 @@ func (d *DB) Put(id, table string, row datum.Row, insertOnly bool) error {
 	if r.Created > tx.Snapshot {
 		return fault("conflict", "relation outside transaction catalog snapshot")
 	}
+	if r.CurrentRevision().Sequence > tx.Snapshot {
+		return fault("conflict", "relation schema evolved after transaction began; restart the transaction")
+	}
 	normalized, err := r.Normalize(row)
 	if err != nil {
 		return invalid(err)
@@ -125,6 +128,9 @@ func (d *DB) Delete(id, table string, value datum.Value) error {
 	}
 	if r.Created > tx.Snapshot {
 		return fault("conflict", "relation outside transaction catalog snapshot")
+	}
+	if r.CurrentRevision().Sequence > tx.Snapshot {
+		return fault("conflict", "relation schema evolved after transaction began; restart the transaction")
 	}
 	col, _ := r.Column(r.Primary)
 	if value.Null() || value.Kind != col.Type {

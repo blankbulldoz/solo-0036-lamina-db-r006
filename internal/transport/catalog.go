@@ -37,3 +37,15 @@ func (s *Server) createIndex(w http.ResponseWriter, r *http.Request) {
 	}
 	write(w, 201, out)
 }
+func (s *Server) evolveRelation(w http.ResponseWriter, r *http.Request) {
+	var in catalog.EvolveRequest
+	if !decode(w, r, &in) {
+		return
+	}
+	out, err := s.db.EvolveRelation(in)
+	if err != nil {
+		respondError(w, err)
+		return
+	}
+	write(w, 200, out)
+}

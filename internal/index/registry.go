@@ -11,11 +11,24 @@ func Build(c *catalog.Catalog, s *versions.Store) *Registry {
 	r := &Registry{Trees: map[string]*Tree{}}
 	for name, definition := range c.Indexes {
 		tree := New()
+		relation, ok := c.Relations[definition.Relation]
+		if !ok {
+			r.Trees[name] = tree
+			continue
+		}
+		relation.EnsureRevisions()
 		for key, chain := range s.Tables[definition.Relation] {
 			for _, v := range chain {
-				if !v.Deleted {
-					tree.Add(v.Row[definition.Column], key)
+				if v.Deleted {
+					continue
 				}
+				// Historical rows may predate a later-added indexed column;
+				// project them through the current schema (with defaults).
+				row, err := relation.Interpret(v.Row)
+				if err != nil {
+					continue
+				}
+				tree.Add(row[definition.Column], key)
 			}
 		}
 		r.Trees[name] = tree

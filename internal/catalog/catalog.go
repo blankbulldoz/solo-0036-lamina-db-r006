@@ -41,11 +41,23 @@ func (c *Catalog) CheckIndex(i Index) error {
 	}
 	return nil
 }
+
+func cloneRelation(r Relation) Relation {
+	r.Columns = cloneColumns(r.Columns)
+	if len(r.Revisions) > 0 {
+		revs := make([]Revision, len(r.Revisions))
+		for i, rev := range r.Revisions {
+			revs[i] = Revision{Sequence: rev.Sequence, Action: rev.Action, Note: rev.Note, Columns: cloneColumns(rev.Columns)}
+		}
+		r.Revisions = revs
+	}
+	return r
+}
+
 func (c *Catalog) List() []Relation {
 	out := make([]Relation, 0, len(c.Relations))
 	for _, r := range c.Relations {
-		r.Columns = append([]Column(nil), r.Columns...)
-		out = append(out, r)
+		out = append(out, cloneRelation(r))
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out

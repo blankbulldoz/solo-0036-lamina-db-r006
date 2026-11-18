@@ -87,10 +87,13 @@ func (d *DB) Vacuum(requested uint64) (versions.VacuumResult, error) {
 	}
 	beforeKeys, beforeVersions := d.store.Count()
 	_ = beforeKeys
+	revisionsBefore := d.catalog.RevisionCount()
 	if err := d.publish(journal.Record{Kind: "vacuum", Horizon: horizon}); err != nil {
 		return versions.VacuumResult{}, err
 	}
 	_, remaining := d.store.Count()
+	result := versions.VacuumResult{Horizon: horizon, Removed: beforeVersions - remaining, Retained: remaining, Pinned: horizon < requested}
+	result.SchemaRevisionsPruned = revisionsBefore - d.catalog.RevisionCount()
 	d.indexes = index.Build(d.catalog, d.store)
-	return versions.VacuumResult{Horizon: horizon, Removed: beforeVersions - remaining, Retained: remaining, Pinned: horizon < requested}, nil
+	return result, nil
 }
